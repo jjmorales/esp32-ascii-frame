@@ -1,0 +1,16 @@
+# Build output / PlatformIO
+.pio/
+.vscode/
+
+# Generated firmware art
+src/art_data.h
+
+# Loaded ASCII art + gesture data (user content)
+ascii/*.json
+gestures/**/*.json
+
+# OS / editor / python
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc
