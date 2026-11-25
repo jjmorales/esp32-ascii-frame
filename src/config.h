@@ -5,6 +5,17 @@
 static const int   BRIGHTNESS   = 200;    // backlight, 0-255
 static const int   MARGIN       = 12;     // px of black kept free on every side
 
+// ---- Battery ----------------------------------------------------------------
+static const int   BATT_HOLD_PIN = 41;    // HIGH holds lithium battery power on; LOW cuts it (shutdown)
+static const int   BATT_ADC_PIN = 1;     // battery voltage sense (Waveshare 1.69: GPIO1 behind a divider)
+static const float BATT_DIVIDER  = 3.0f;  // pin voltage * this = battery voltage
+static const float BATT_EMPTY_V  = 3.3f;  // shown as 0%
+static const float BATT_FULL_V   = 4.15f; // shown as 100%
+
+// ---- Touch ------------------------------------------------------------------
+static const int   SWIPE_MIN_PX  = 50;    // upward travel needed to count as a swipe (opens/closes the menu)
+static const int   TAP_SLOP_PX   = 20;    // max finger travel that still counts as a tap
+
 // ---- Global ASCII adjustments (applied to every piece and gesture) -----------
 static const bool  INVERT       = false;  // true: swap light and dark
 static const float ART_BRIGHT   = 0.0f;   // -1.0 .. 1.0, added after contrast

@@ -3,6 +3,7 @@
 // build time. All settings are in config.h.
 #include <Arduino.h>
 #include <math.h>
+#include <Preferences.h>
 #include "LGFX_Config.h"
 #include "config.h"
 #include "art_data.h"
@@ -90,6 +91,20 @@ static void load(Loaded& L, const Piece& p) {
   }
 }
 
+// ------------------------------------------------------------------ battery
+// Battery percentage from the voltage divider on BATT_ADC_PIN, re-read every 5 s.
+static int batteryPercent(uint32_t now) {
+  static int pct = -1;
+  static uint32_t last = 0;
+  if (pct >= 0 && now - last < 5000) return pct;
+  last = now;
+  uint32_t mv = 0;
+  for (int i = 0; i < 16; i++) mv += analogReadMilliVolts(BATT_ADC_PIN);
+  float v = mv / 16.0f / 1000.0f * BATT_DIVIDER;
+  pct = (int)constrain((v - BATT_EMPTY_V) / (BATT_FULL_V - BATT_EMPTY_V) * 100.0f + 0.5f, 0.0f, 100.0f);
+  return pct;
+}
+
 static void show(const Loaded& L, int frame) {
   if (!L.buf[frame]) return;
   // Explicit native RGB565 type: a plain uint16_t* is treated as byte-swapped.
@@ -139,16 +154,147 @@ static bool detectShake(uint32_t now) {
   return false;
 }
 
+// ----------------------------------------------------------------- settings
+// Slideshow settings survive power cycles (stored in NVS).
+static const uint32_t SLIDE_SECONDS[] = {5, 10, 30};
+static const int SLIDE_OPTIONS = sizeof SLIDE_SECONDS / sizeof SLIDE_SECONDS[0];
+static bool slideshow = false;
+static int slideIdx = 0;
+static Preferences prefs;
+
+static void loadSettings() {
+  prefs.begin("frame", false);
+  slideshow = prefs.getBool("slide", false);
+  slideIdx = constrain((int)prefs.getUChar("slideIdx", 0), 0, SLIDE_OPTIONS - 1);
+}
+
+static void saveSettings() {
+  prefs.putBool("slide", slideshow);
+  prefs.putUChar("slideIdx", (uint8_t)slideIdx);
+}
+
+// ---------------------------------------------------------------- touch input
+enum Gesture { G_NONE, G_TAP, G_SWIPE_UP };
+static int32_t tapX, tapY;  // where the last G_TAP started
+
+// Reports one gesture per finger lift: a swipe up, a tap, or nothing.
+static Gesture pollTouch() {
+  static bool wasDown = false;
+  static int32_t sx, sy, lx, ly;
+  int32_t x, y;
+  bool down = lcd.getTouch(&x, &y);
+  Gesture g = G_NONE;
+  if (down) {
+    if (!wasDown) { sx = x; sy = y; }
+    lx = x; ly = y;
+  } else if (wasDown) {
+    int dx = lx - sx, dy = ly - sy;
+    if (dy <= -SWIPE_MIN_PX && abs(dx) < -dy) g = G_SWIPE_UP;
+    else if (abs(dx) < TAP_SLOP_PX && abs(dy) < TAP_SLOP_PX) { g = G_TAP; tapX = sx; tapY = sy; }
+  }
+  wasDown = down;
+  return g;
+}
+
+// ------------------------------------------------------------------ menu UI
+// Layout stays inside x 20..220 so the screen's rounded corners don't clip it.
+static const int TOG_X = 20, TOG_Y = 58, TOG_W = 200, TOG_H = 52;
+static const int BTN_Y = 140, BTN_W = 60, BTN_H = 44;
+static const int BTN_X[3] = {20, 90, 160};
+
+static bool inRect(int x, int y, int rx, int ry, int rw, int rh) {
+  return x >= rx && x < rx + rw && y >= ry && y < ry + rh;
+}
+
+static void drawMenuBattery(uint32_t now) {
+  char s[24];
+  snprintf(s, sizeof s, "Battery %d%%", batteryPercent(now));
+  lcd.setTextSize(2);
+  lcd.setTextDatum(middle_center);
+  lcd.setTextPadding(170);  // clears leftovers when the text gets shorter
+  lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+  lcd.drawString(s, lcd.width() / 2, 215);
+  lcd.setTextPadding(0);
+}
+
+static void drawMenu(uint32_t now) {
+  const uint16_t gray = lcd.color565(140, 140, 140);
+  const uint16_t accent = lcd.color565(40, 100, 220);
+  const uint16_t togBg = slideshow ? lcd.color565(30, 140, 60) : lcd.color565(60, 60, 60);
+  lcd.fillScreen(TFT_BLACK);
+  lcd.setTextDatum(middle_center);
+
+  lcd.setTextSize(2);
+  lcd.setTextColor(TFT_WHITE, TFT_BLACK);
+  lcd.drawString("SETTINGS", lcd.width() / 2, 30);
+
+  // Slideshow toggle
+  lcd.fillRoundRect(TOG_X, TOG_Y, TOG_W, TOG_H, 12, togBg);
+  lcd.setTextColor(TFT_WHITE, togBg);
+  lcd.drawString(slideshow ? "Slideshow ON" : "Slideshow OFF", TOG_X + TOG_W / 2, TOG_Y + TOG_H / 2);
+
+  // Interval buttons
+  lcd.setTextSize(1);
+  lcd.setTextColor(gray, TFT_BLACK);
+  lcd.drawString("Change image every", lcd.width() / 2, 124);
+  lcd.setTextSize(2);
+  for (int i = 0; i < SLIDE_OPTIONS; i++) {
+    bool sel = (i == slideIdx);
+    uint16_t bg = sel ? (slideshow ? accent : lcd.color565(70, 70, 70)) : lcd.color565(30, 30, 30);
+    lcd.fillRoundRect(BTN_X[i], BTN_Y, BTN_W, BTN_H, 10, bg);
+    lcd.setTextColor(slideshow || sel ? TFT_WHITE : gray, bg);
+    char s[8];
+    snprintf(s, sizeof s, "%us", (unsigned)SLIDE_SECONDS[i]);
+    lcd.drawString(s, BTN_X[i] + BTN_W / 2, BTN_Y + BTN_H / 2);
+  }
+
+  drawMenuBattery(now);
+
+  lcd.setTextSize(1);
+  lcd.setTextColor(gray, TFT_BLACK);
+  lcd.drawString("swipe up to close", lcd.width() / 2, 250);
+}
+
+static void menuTap(int x, int y, uint32_t now) {
+  if (inRect(x, y, TOG_X, TOG_Y, TOG_W, TOG_H)) {
+    slideshow = !slideshow;
+  } else {
+    int hit = -1;
+    for (int i = 0; i < SLIDE_OPTIONS; i++)
+      if (inRect(x, y, BTN_X[i], BTN_Y, BTN_W, BTN_H)) hit = i;
+    if (hit < 0) return;
+    slideIdx = hit;
+  }
+  saveSettings();
+  drawMenu(now);
+}
+
 // -------------------------------------------------------------------- main
 static bool imuOk = false;
+static bool inMenu = false;
+static int piece = 0, frame = 0;
+static uint32_t nextFrame = 0, nextSlide = 0;
+
+static void armSlideshow(uint32_t now) { nextSlide = now + SLIDE_SECONDS[slideIdx] * 1000UL; }
+
+static void selectPiece(int p) {
+  piece = p;
+  load(cur, ASCII_PIECES[piece]);
+  lcd.fillScreen(TFT_BLACK);
+  frame = 0;
+  nextFrame = 0;
+}
 
 void setup() {
+  pinMode(BATT_HOLD_PIN, OUTPUT);
+  digitalWrite(BATT_HOLD_PIN, HIGH);   // hold battery power on; to shut down: digitalWrite(BATT_HOLD_PIN, LOW)
   Serial.begin(115200);
   lcd.init();
   lcd.setRotation(0);
   lcd.setBrightness(BRIGHTNESS);
   lcd.fillScreen(TFT_BLACK);
   buildLut();
+  loadSettings();
 
   if (ASCII_COUNT > 0) load(cur, ASCII_PIECES[0]);
   if (SHAKE_ENABLED && SHAKE_COUNT > 0) {
@@ -156,26 +302,55 @@ void setup() {
     imuOk = imuInit();
     Serial.println(imuOk ? "shake: IMU ready" : "shake: IMU not found, gesture disabled");
   }
+  armSlideshow(millis());
 }
 
 void loop() {
-  static int piece = 0, shakeIdx = 0, frame = 0, loops = 0;
-  static bool gesturing = false, wasDown = false;
-  static uint32_t next = 0, cooldownUntil = 0;
+  static int shakeIdx = 0, loops = 0, shownPct = -1;
+  static bool gesturing = false;
+  static uint32_t cooldownUntil = 0;
   uint32_t now = millis();
+  Gesture g = pollTouch();
+
+  // ---- settings menu: swipe up closes it; the art is paused meanwhile
+  if (inMenu) {
+    if (g == G_SWIPE_UP) {
+      inMenu = false;
+      lcd.fillScreen(TFT_BLACK);
+      nextFrame = 0;
+      armSlideshow(now);
+      return;
+    }
+    if (g == G_TAP) menuTap(tapX, tapY, now);
+    int pct = batteryPercent(now);
+    if (pct != shownPct) { shownPct = pct; drawMenuBattery(now); }
+    delay(10);
+    return;
+  }
+
+  // ---- swipe up in the viewer opens the menu (cancels any gesture in progress)
+  if (g == G_SWIPE_UP) {
+    inMenu = true;
+    gesturing = false;
+    frame = 0;
+    cooldownUntil = now + SHAKE_COOLDOWN;
+    shownPct = batteryPercent(now);
+    drawMenu(now);
+    return;
+  }
 
   if (!gesturing) {
-    // Tap (finger-down edge) -> next piece.
-    int32_t tx, ty;
-    bool down = lcd.getTouch(&tx, &ty);
-    if (down && !wasDown && ASCII_COUNT > 1) {
-      piece = (piece + 1) % ASCII_COUNT;
-      load(cur, ASCII_PIECES[piece]);
-      lcd.fillScreen(TFT_BLACK);
-      frame = 0;
-      next = 0;
+    // Tap -> next piece.
+    if (g == G_TAP && ASCII_COUNT > 1) {
+      selectPiece((piece + 1) % ASCII_COUNT);
+      armSlideshow(now);
     }
-    wasDown = down;
+
+    // Slideshow: advance on a timer, wrapping around after the last piece.
+    if (slideshow && ASCII_COUNT > 1 && now >= nextSlide) {
+      selectPiece((piece + 1) % ASCII_COUNT);
+      armSlideshow(now);
+    }
 
     // Shake -> play the next gesture animation.
     if (imuOk && gest.piece && now >= cooldownUntil && detectShake(now)) {
@@ -186,16 +361,16 @@ void loop() {
       gesturing = true;
       frame = 0;
       loops = 0;
-      next = 0;
+      nextFrame = 0;
       lcd.fillScreen(TFT_BLACK);
     }
   }
 
   const Loaded& L = gesturing ? gest : cur;
   if (!L.piece || L.count == 0) { delay(10); return; }
-  if (now < next) { delay(2); return; }
+  if (now < nextFrame) { delay(2); return; }
   show(L, frame);
-  next = now + max((uint32_t)1, (uint32_t)(L.piece->frames[frame].ms / SPEED));  // no catch-up bursts
+  nextFrame = now + max((uint32_t)1, (uint32_t)(L.piece->frames[frame].ms / SPEED));  // no catch-up bursts
 
   if (++frame >= L.count) {
     frame = 0;
@@ -203,7 +378,8 @@ void loop() {
       gesturing = false;
       cooldownUntil = now + SHAKE_COOLDOWN;
       lcd.fillScreen(TFT_BLACK);
-      next = 0;
+      nextFrame = 0;
+      armSlideshow(now);
     }
   }
 }
